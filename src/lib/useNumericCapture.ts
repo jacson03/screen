@@ -91,13 +91,13 @@ export function useNumericCapture() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const startedAtRef = useRef(0);
-  const lastValueRef = useRef<string | null>(null);
+  const lastCapturedValueRef = useRef<string | null>(null);
   const pendingValueRef = useRef<{ value: string; matches: number } | null>(null);
   const busyRef = useRef(false);
 
   const clearEvents = useCallback(() => {
     setEvents([]);
-    lastValueRef.current = null;
+    lastCapturedValueRef.current = null;
     pendingValueRef.current = null;
   }, []);
 
@@ -170,9 +170,9 @@ export function useNumericCapture() {
           const previous = pendingValueRef.current;
           const matches = previous?.value === redValue ? previous.matches + 1 : 1;
           pendingValueRef.current = { value: redValue, matches };
-          if (matches < 2 || redValue === lastValueRef.current) return;
+          if (matches < 2 || redValue === lastCapturedValueRef.current) return;
 
-          lastValueRef.current = redValue;
+          lastCapturedValueRef.current = redValue;
           const now = Date.now();
           setEvents((previousEvents) => [
             ...previousEvents,
