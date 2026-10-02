@@ -17,47 +17,88 @@ function extractNumber(text: string): string | null {
   return /^[-+]?\d+(?:\.\d+)?$/.test(value) ? value : null;
 }
 
-function createOcrCanvas(source: HTMLCanvasElement): HTMLCanvasElement {
-  const scale = 2;
-  const canvas = document.createElement('canvas');
-  canvas.width = source.width * scale;
-  canvas.height = source.height * scale;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) return source;
+interface PreparedFrame {
+  textCanvas: HTMLCanvasElement;
+  numberCanvas: HTMLCanvasElement;
+  redPixelRatio: number;
+}
 
-  context.imageSmoothingEnabled = false;
-  context.drawImage(source, 0, 0, canvas.width, canvas.height);
-  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+function prepareFrame(source: HTMLCanvasElement): PreparedFrame {
+  const scale = 3;
+  const textCanvas = document.createElement('canvas');
+  const numberCanvas = document.createElement('canvas');
+  textCanvas.width = source.width * scale;
+  textCanvas.height = source.height * scale;
+  numberCanvas.width = textCanvas.width;
+  numberCanvas.height = textCanvas.height;
+
+  const sourceContext = source.getContext('2d', { willReadFrequently: true });
+  const textContext = textCanvas.getContext('2d', { willReadFrequently: true });
+  const numberContext = numberCanvas.getContext('2d', { willReadFrequently: true });
+  if (!sourceContext || !textContext || !numberContext) {
+    return { textCanvas: source, numberCanvas: source, redPixelRatio: 0 };
+  }
+
+  textContext.imageSmoothingEnabled = false;
+  textContext.drawImage(source, 0, 0, textCanvas.width, textCanvas.height);
+  numberContext.fillStyle = '#000';
+  numberContext.fillRect(0, 0, numberCanvas.width, numberCanvas.height);
+
+  const image = sourceContext.getImageData(0, 0, source.width, source.height);
+  const redMask = numberContext.createImageData(numberCanvas.width, numberCanvas.height);
+  let redPixels = 0;
   for (let index = 0; index < image.data.length; index += 4) {
     const red = image.data[index];
     const green = image.data[index + 1];
     const blue = image.data[index + 2];
-    // Purple overlays have high blue/red relative to green. Make them white
-    // and the dark background black so decimal points remain visible to OCR.
-    const purple = red > green * 1.15 && blue > green * 1.15;
-    const luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
-    const value = purple ? 255 : luminance > 150 ? 255 : 0;
-    image.data[index] = value;
-    image.data[index + 1] = value;
-    image.data[index + 2] = value;
+    const isRed = red >= 120 && red > green * 1.35 && red > blue * 1.25;
+    if (!isRed) continue;
+    redPixels += 1;
+    const sourceX = (index / 4) % source.width;
+    const sourceY = Math.floor(index / 4 / source.width);
+    for (let y = 0; y < scale; y += 1) {
+      for (let x = 0; x < scale; x += 1) {
+        const targetIndex = ((sourceY * scale + y) * numberCanvas.width + sourceX * scale + x) * 4;
+        redMask.data[targetIndex] = 255;
+        redMask.data[targetIndex + 1] = 255;
+        redMask.data[targetIndex + 2] = 255;
+        redMask.data[targetIndex + 3] = 255;
+      }
+    }
   }
-  context.putImageData(image, 0, 0);
-  return canvas;
+  numberContext.putImageData(redMask, 0, 0);
+
+  return {
+    textCanvas,
+    numberCanvas,
+    redPixelRatio: redPixels / (source.width * source.height),
+  };
+}
+
+function normalizeOcrText(text: string): string {
+  return text.toUpperCase().replace(/[^A-Z]+/g, ' ').trim();
+}
+
+function hasExactTrigger(text: string): boolean {
+  return /(^| )FLEW AWAY( |$)/.test(normalizeOcrText(text));
 }
 
 export function useNumericCapture() {
   const [events, setEvents] = useState<CapturedNumber[]>([]);
   const [processing, setProcessing] = useState(false);
-  const workerRef = useRef<Worker | null>(null);
+  const textWorkerRef = useRef<Worker | null>(null);
+  const numberWorkerRef = useRef<Worker | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const startedAtRef = useRef(0);
   const lastValueRef = useRef<string | null>(null);
+  const pendingValueRef = useRef<{ value: string; matches: number } | null>(null);
   const busyRef = useRef(false);
 
   const clearEvents = useCallback(() => {
     setEvents([]);
     lastValueRef.current = null;
+    pendingValueRef.current = null;
   }, []);
 
   const stop = useCallback(() => {
@@ -78,47 +119,72 @@ export function useNumericCapture() {
       startedAtRef.current = startedAt;
       setProcessing(true);
 
-      if (!workerRef.current) {
-        workerRef.current = await createWorker('eng');
-        await workerRef.current.setParameters({
-          tessedit_char_whitelist: '0123456789.,+-',
-          tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+      if (!textWorkerRef.current) {
+        textWorkerRef.current = await createWorker('eng');
+        await textWorkerRef.current.setParameters({
+          tessedit_pageseg_mode: PSM.SPARSE_TEXT,
+          preserve_interword_spaces: '1',
+        });
+      }
+      if (!numberWorkerRef.current) {
+        numberWorkerRef.current = await createWorker('eng');
+        await numberWorkerRef.current.setParameters({
+          tessedit_char_whitelist: '0123456789.,+-xX',
+          tessedit_pageseg_mode: PSM.SINGLE_LINE,
           preserve_interword_spaces: '1',
         });
       }
 
       const scan = async () => {
-        if (busyRef.current || !canvasRef.current || !workerRef.current) return;
+        if (busyRef.current || !canvasRef.current || !textWorkerRef.current || !numberWorkerRef.current) return;
         busyRef.current = true;
         try {
-          const processedCanvas = createOcrCanvas(canvasRef.current);
-          const [processedResult, originalResult] = await Promise.all([
-            workerRef.current.recognize(processedCanvas),
-            workerRef.current.recognize(canvasRef.current),
-          ]);
-          const candidates = ([processedResult, originalResult]
-            .map((result) => ({
-              value: extractNumber(result.data.text),
-              confidence: result.data.confidence ?? null,
-            })) as { value: string | null; confidence: number | null }[])
-            .filter((c): c is { value: string; confidence: number | null } => c.value !== null)
-            .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
-          const candidate = candidates[0];
-          if (candidate && candidate.value !== lastValueRef.current) {
-            lastValueRef.current = candidate.value;
-            const now = Date.now();
-            setEvents((previous) => [
-              ...previous,
-              {
-                value: candidate.value,
-                numeric_value: Number(candidate.value),
-                captured_at: new Date(now).toISOString(),
-                elapsed_ms: now - startedAtRef.current,
-                confidence: candidate.confidence,
-                source: 'ocr',
-              },
-            ]);
+          const frame = prepareFrame(canvasRef.current);
+          if (frame.redPixelRatio < 0.002) {
+            pendingValueRef.current = null;
+            return;
           }
+
+          const [textResult, redResult, textNumberResult] = await Promise.all([
+            textWorkerRef.current.recognize(frame.textCanvas),
+            numberWorkerRef.current.recognize(frame.numberCanvas),
+            numberWorkerRef.current.recognize(frame.textCanvas),
+          ]);
+          const textConfidence = textResult.data.confidence ?? 0;
+          const numberConfidence = Math.min(
+            redResult.data.confidence ?? 0,
+            textNumberResult.data.confidence ?? 0,
+          );
+          if (!hasExactTrigger(textResult.data.text) || textConfidence < 70 || numberConfidence < 70) {
+            pendingValueRef.current = null;
+            return;
+          }
+
+          const redValue = extractNumber(redResult.data.text);
+          const textValue = extractNumber(textNumberResult.data.text);
+          if (!redValue || redValue !== textValue || !Number.isFinite(Number(redValue))) {
+            pendingValueRef.current = null;
+            return;
+          }
+
+          const previous = pendingValueRef.current;
+          const matches = previous?.value === redValue ? previous.matches + 1 : 1;
+          pendingValueRef.current = { value: redValue, matches };
+          if (matches < 2 || redValue === lastValueRef.current) return;
+
+          lastValueRef.current = redValue;
+          const now = Date.now();
+          setEvents((previousEvents) => [
+            ...previousEvents,
+            {
+              value: redValue,
+              numeric_value: Number(redValue),
+              captured_at: new Date(now).toISOString(),
+              elapsed_ms: now - startedAtRef.current,
+              confidence: Math.min(textConfidence, numberConfidence),
+              source: 'ocr',
+            },
+          ]);
         } finally {
           busyRef.current = false;
         }
@@ -133,8 +199,11 @@ export function useNumericCapture() {
   useEffect(() => {
     return () => {
       stop();
-      if (workerRef.current) {
-        void workerRef.current.terminate();
+      if (textWorkerRef.current) {
+        void textWorkerRef.current.terminate();
+      }
+      if (numberWorkerRef.current) {
+        void numberWorkerRef.current.terminate();
       }
     };
   }, [stop]);
