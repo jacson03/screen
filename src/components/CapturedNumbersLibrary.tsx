@@ -1,44 +1,54 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Download, RefreshCw, Table2 } from 'lucide-react';
-import type { CapturedNumber, RecordingMetadata } from '@/lib/types';
+import type { CapturedNumber, LiveCaptureLog, RecordingMetadata } from '@/lib/types';
 import { downloadBlob, formatCapturedTimestamp } from '@/lib/utils';
+
+
+
+interface NumberLogRow {
+  recordingTitle: string;
+  event: CapturedNumber;
+}
 
 interface CapturedNumbersLibraryProps {
   recordings: RecordingMetadata[];
   getCapturedNumbers: (id: string) => Promise<CapturedNumber[]>;
+  getActiveCaptureLogs: () => Promise<LiveCaptureLog[]>;
 }
 
-interface NumberLogRow {
-  recording: RecordingMetadata;
-  event: CapturedNumber;
-}
-
-export function CapturedNumbersLibrary({ recordings, getCapturedNumbers }: CapturedNumbersLibraryProps) {
+export function CapturedNumbersLibrary({ recordings, getCapturedNumbers, getActiveCaptureLogs }: CapturedNumbersLibraryProps) {
   const [rows, setRows] = useState<NumberLogRow[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
-    void Promise.all(
-      recordings.map(async (recording) => {
-        const numbers = await getCapturedNumbers(recording.id);
-        return numbers.map((event) => ({ recording, event }));
-      })
-    ).then((groups) => {
+    void Promise.all([
+      Promise.all(
+        recordings.map(async (recording) => {
+          const numbers = await getCapturedNumbers(recording.id);
+          return numbers.map((event) => ({ recordingTitle: recording.title, event }));
+        })
+      ),
+      getActiveCaptureLogs(),
+    ]).then(([recordingGroups, liveLogs]) => {
       if (active) {
-        setRows(groups.flat().sort((a, b) => b.event.captured_at.localeCompare(a.event.captured_at)));
+        const liveRows = liveLogs.flatMap((log) => log.events.map((event) => ({
+          recordingTitle: `Live capture • ${formatCapturedTimestamp(log.startedAt)}`,
+          event,
+        })));
+        setRows([...recordingGroups.flat(), ...liveRows].sort((a, b) => b.event.captured_at.localeCompare(a.event.captured_at)));
         setLoading(false);
       }
     });
     return () => {
       active = false;
     };
-  }, [getCapturedNumbers, recordings]);
+  }, [getActiveCaptureLogs, getCapturedNumbers, recordings]);
 
   const exportRows = useMemo(
-    () => rows.map(({ recording, event }) => ({
-      recording: recording.title,
+    () => rows.map(({ recordingTitle, event }) => ({
+      recording: recordingTitle,
       value: event.value,
       numeric_value: event.numeric_value,
       captured_at: event.captured_at,
@@ -104,13 +114,13 @@ export function CapturedNumbersLibrary({ recordings, getCapturedNumbers }: Captu
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/70">
-                {rows.map(({ recording, event }, index) => (
+                {rows.map(({ recordingTitle, event }, index) => (
                   <tr key={event.id ?? `${event.captured_at}-${index}`} className="transition-colors hover:bg-slate-800/25">
                     <td className="whitespace-nowrap px-5 py-4 font-mono text-sm text-slate-300">
                       {formatCapturedTimestamp(event.captured_at)}
                     </td>
                     <td className="px-5 py-4 font-mono text-lg font-bold text-sky-300">{event.value}</td>
-                    <td className="max-w-[240px] truncate px-5 py-4 text-sm text-slate-300">{recording.title}</td>
+                    <td className="max-w-[240px] truncate px-5 py-4 text-sm text-slate-300">{recordingTitle}</td>
                     <td className="whitespace-nowrap px-5 py-4 font-mono text-sm text-slate-500">{event.elapsed_ms} ms</td>
                     <td className="px-5 py-4 text-sm text-slate-500">{event.confidence == null ? '—' : `${event.confidence.toFixed(1)}%`}</td>
                   </tr>

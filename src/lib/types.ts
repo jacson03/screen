@@ -20,6 +20,12 @@ export interface CapturedNumber {
   source: 'ocr';
 }
 
+export interface LiveCaptureLog {
+  sessionId: string;
+  startedAt: string;
+  events: CapturedNumber[];
+}
+
 export interface RecordingMetadata {
   id: string;
   title: string;

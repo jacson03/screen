@@ -19,7 +19,7 @@ import { useNumericCapture } from '@/lib/useNumericCapture';
 import { useRecordings } from '@/lib/useRecordings';
 import { RecordingTimer } from '@/components/RecordingTimer';
 import { generateThumbnail, formatFileSize, formatDuration, downloadBlob } from '@/lib/utils';
-import type { CaptureRegion, RecordingFormat } from '@/lib/types';
+import type { CaptureRegion, CapturedNumber, RecordingFormat } from '@/lib/types';
 
 interface RecordingStudioProps {
   onSaved: () => void;
@@ -42,7 +42,13 @@ export function RecordingStudio({ onSaved }: RecordingStudioProps) {
     reset,
     cleanup,
   } = useScreenRecorder();
-  const { saveRecording, saveCaptureData } = useRecordings();
+  const {
+    saveRecording,
+    saveCaptureData,
+    createCaptureSession,
+    saveCaptureSessionNumber,
+    finishCaptureSession,
+  } = useRecordings();
   const { events, processing, start: startNumericCapture, stop: stopNumericCapture, clearEvents } = useNumericCapture();
 
   const [includeAudio, setIncludeAudio] = useState(true);
@@ -59,6 +65,7 @@ export function RecordingStudio({ onSaved }: RecordingStudioProps) {
   const selectionVideoRef = useRef<HTMLVideoElement>(null);
   const selectionSurfaceRef = useRef<HTMLDivElement>(null);
   const numericStartedAtRef = useRef(0);
+  const activeSessionIdRef = useRef<string | null>(null);
 
   const isRecording = status === 'recording';
   const isPaused = status === 'paused';
@@ -77,12 +84,26 @@ export function RecordingStudio({ onSaved }: RecordingStudioProps) {
   }, [selectionStream]);
 
   useEffect(() => {
-    if (isRecording && captureCanvas) {
-      void startNumericCapture(captureCanvas, numericStartedAtRef.current);
+    if (isRecording && captureCanvas && activeSessionIdRef.current) {
+      void startNumericCapture(
+        captureCanvas,
+        numericStartedAtRef.current,
+        (event: CapturedNumber) => {
+          const sessionId = activeSessionIdRef.current;
+          if (sessionId) void saveCaptureSessionNumber(sessionId, event);
+        },
+      );
     } else if (!isRecording && !isPaused) {
       stopNumericCapture();
     }
-  }, [captureCanvas, isPaused, isRecording, startNumericCapture, stopNumericCapture]);
+  }, [captureCanvas, isPaused, isRecording, saveCaptureSessionNumber, startNumericCapture, stopNumericCapture]);
+
+  useEffect(() => {
+    if (!isStopped || !activeSessionIdRef.current) return;
+    const sessionId = activeSessionIdRef.current;
+    activeSessionIdRef.current = null;
+    void finishCaptureSession(sessionId, 'completed');
+  }, [finishCaptureSession, isStopped]);
 
   const handleChooseScreen = async () => {
     const stream = await selectScreen();
@@ -144,11 +165,14 @@ export function RecordingStudio({ onSaved }: RecordingStudioProps) {
     });
   };
 
-  const handleStart = () => {
+  const handleStart = async () => {
     if (!selectionRegion) return;
+    const sessionId = await createCaptureSession(selectionRegion);
+    if (!sessionId) return;
     setSavedSuccess(false);
     numericStartedAtRef.current = Date.now();
-    start({ format, includeAudio, region: selectionRegion });
+    activeSessionIdRef.current = sessionId;
+    void start({ format, includeAudio, region: selectionRegion });
     setSelectingScreen(false);
   };
 

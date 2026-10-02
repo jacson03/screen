@@ -19,6 +19,7 @@ function App() {
     updateRecording,
     getRecordingVideoUrl,
     getCapturedNumbers,
+    getActiveCaptureLogs,
     refresh,
   } = useRecordings();
 
@@ -61,6 +62,7 @@ function App() {
             <CapturedNumbersLibrary
               recordings={recordings}
               getCapturedNumbers={getCapturedNumbers}
+              getActiveCaptureLogs={getActiveCaptureLogs}
             />
           )}
         </main>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
-import type { CaptureRegion, CapturedNumber, RecordingMetadata } from '@/lib/types';
+import type { CaptureRegion, CapturedNumber, LiveCaptureLog, RecordingMetadata } from '@/lib/types';
 import { saveVideoBlob, deleteVideoBlob, getVideoBlob } from '@/lib/indexedDB';
 
 export function useRecordings() {
@@ -48,6 +48,81 @@ export function useRecordings() {
     },
     []
   );
+
+  const createCaptureSession = useCallback(async (region: CaptureRegion | null): Promise<string | null> => {
+    const { data, error: insertError } = await supabase
+      .from('capture_sessions')
+      .insert({
+        region_x: region ? Math.round(region.x) : null,
+        region_y: region ? Math.round(region.y) : null,
+        region_width: region ? Math.round(region.width) : null,
+        region_height: region ? Math.round(region.height) : null,
+        source_width: region ? Math.round(region.sourceWidth) : null,
+        source_height: region ? Math.round(region.sourceHeight) : null,
+      })
+      .select('id')
+      .maybeSingle();
+    if (insertError || !data) {
+      setError(insertError?.message ?? 'Failed to start durable capture session');
+      return null;
+    }
+    return data.id as string;
+  }, []);
+
+  const saveCaptureSessionNumber = useCallback(async (sessionId: string, number: CapturedNumber) => {
+    const { error: numberError } = await supabase.from('capture_session_numbers').insert({
+      session_id: sessionId,
+      value: number.value,
+      numeric_value: number.numeric_value,
+      captured_at: number.captured_at,
+      elapsed_ms: number.elapsed_ms,
+      confidence: number.confidence,
+      source: number.source,
+    });
+    if (numberError) {
+      setError(numberError.message);
+      return;
+    }
+    const { error: heartbeatError } = await supabase
+      .from('capture_sessions')
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq('id', sessionId);
+    if (heartbeatError) setError(heartbeatError.message);
+  }, []);
+
+  const finishCaptureSession = useCallback(async (sessionId: string, status: 'completed' | 'interrupted') => {
+    const { error: finishError } = await supabase
+      .from('capture_sessions')
+      .update({ status, last_seen_at: new Date().toISOString() })
+      .eq('id', sessionId);
+    if (finishError) setError(finishError.message);
+  }, []);
+
+  const getActiveCaptureLogs = useCallback(async (): Promise<LiveCaptureLog[]> => {
+    const { data: sessions, error: sessionError } = await supabase
+      .from('capture_sessions')
+      .select('id, started_at')
+      .eq('status', 'active')
+      .order('started_at', { ascending: false });
+    if (sessionError || !sessions) {
+      if (sessionError) setError(sessionError.message);
+      return [];
+    }
+
+    const logs = await Promise.all(sessions.map(async (session) => {
+      const { data: numbers, error: numberError } = await supabase
+        .from('capture_session_numbers')
+        .select('*')
+        .eq('session_id', session.id)
+        .order('elapsed_ms', { ascending: true });
+      if (numberError) {
+        setError(numberError.message);
+        return { sessionId: session.id as string, startedAt: session.started_at as string, events: [] };
+      }
+      return { sessionId: session.id as string, startedAt: session.started_at as string, events: numbers as CapturedNumber[] };
+    }));
+    return logs.filter((log) => log.events.length > 0);
+  }, []);
 
   const saveCaptureData = useCallback(
     async (recordingId: string, region: CaptureRegion | null, numbers: CapturedNumber[]) => {
@@ -129,6 +204,10 @@ export function useRecordings() {
     saveRecording,
     saveCaptureData,
     getCapturedNumbers,
+    createCaptureSession,
+    saveCaptureSessionNumber,
+    finishCaptureSession,
+    getActiveCaptureLogs,
     updateRecording,
     deleteRecording,
     getRecordingVideoUrl,

@@ -112,7 +112,11 @@ export function useNumericCapture() {
   }, []);
 
   const start = useCallback(
-    async (canvas: HTMLCanvasElement, startedAt: number) => {
+    async (
+      canvas: HTMLCanvasElement,
+      startedAt: number,
+      onCapture?: (event: CapturedNumber) => void,
+    ) => {
       stop();
       clearEvents();
       canvasRef.current = canvas;
@@ -174,17 +178,16 @@ export function useNumericCapture() {
 
           lastCapturedValueRef.current = redValue;
           const now = Date.now();
-          setEvents((previousEvents) => [
-            ...previousEvents,
-            {
-              value: redValue,
-              numeric_value: Number(redValue),
-              captured_at: new Date(now).toISOString(),
-              elapsed_ms: now - startedAtRef.current,
-              confidence: Math.min(textConfidence, numberConfidence),
-              source: 'ocr',
-            },
-          ]);
+          const event: CapturedNumber = {
+            value: redValue,
+            numeric_value: Number(redValue),
+            captured_at: new Date(now).toISOString(),
+            elapsed_ms: now - startedAtRef.current,
+            confidence: Math.min(textConfidence, numberConfidence),
+            source: 'ocr',
+          };
+          setEvents((previousEvents) => [...previousEvents, event]);
+          onCapture?.(event);
         } finally {
           busyRef.current = false;
         }
